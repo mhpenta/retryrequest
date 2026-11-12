@@ -186,6 +186,87 @@ For a request that should keep trying through a long outage, combine
 `WithBackOff(func() backoff.BackOff { return backoff.NewConstantBackOff(5*time.Minute) })`.
 Use the caller's context to stop early.
 
+## Example: an SEC EDGAR client
+
+A long-running job against SEC EDGAR combines most of the options: a
+transport that keeps to SEC's rate limit and supplies its expected waits,
+a required User-Agent, a backoff that rides out network outages for about
+four hours, and limits sized for large filings.
+
+```go
+import (
+    "log/slog"
+    "net/http"
+    "time"
+
+    "github.com/cenkalti/backoff/v7"
+    "github.com/mhpenta/retryrequest"
+    "golang.org/x/time/rate"
+)
+
+// secTransport keeps to SEC's limit of 10 requests per second, retries
+// included, and supplies the waits SEC expects when it sends no Retry-After:
+// 10 minutes after a 429 and 2 minutes after a 503.
+type secTransport struct {
+    next    http.RoundTripper
+    limiter *rate.Limiter
+}
+
+func (t secTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+    if err := t.limiter.Wait(req.Context()); err != nil {
+        if req.Body != nil {
+            req.Body.Close()
+        }
+        return nil, err
+    }
+    resp, err := t.next.RoundTrip(req)
+    if err != nil || resp.Header.Get("Retry-After") != "" {
+        return resp, err
+    }
+    switch resp.StatusCode {
+    case http.StatusTooManyRequests:
+        resp.Header.Set("Retry-After", "601")
+    case http.StatusServiceUnavailable:
+        resp.Header.Set("Retry-After", "120")
+    }
+    return resp, nil
+}
+
+func NewSECClient() *retryrequest.Client {
+    return retryrequest.New(
+		// Respect SEC rate limits 
+        retryrequest.WithHTTPClient(&http.Client{
+            Transport: secTransport{
+				next: http.DefaultTransport, 
+				limiter: rate.NewLimiter(10, 10),
+			},
+        }),
+        // SEC requires a User-Agent that identifies you.
+        retryrequest.WithUserAgent("ACME Corp admin@acme.com"),
+        // Ride out network outages for about four hours: 15s doubling to a
+        // 16-minute ceiling. A custom backoff is not capped by default, so the
+        // 10-minute Retry-After on a 429 is honored too.
+        retryrequest.WithUnlimitedAttempts(),
+        retryrequest.WithMaxElapsedTime(4*time.Hour),
+        retryrequest.WithBackOff(func() backoff.BackOff {
+            return &backoff.ExponentialBackOff{
+                InitialInterval:     15 * time.Second,
+                Multiplier:          2,
+                MaxInterval:         16 * time.Minute,
+                RandomizationFactor: 0.1,
+            }
+        }),
+        // Large filings can take minutes and exceed the default 50 MiB limit.
+        retryrequest.WithPerAttemptTimeout(6*time.Minute),
+        retryrequest.WithMaxBodyBytes(500<<20),
+        retryrequest.WithLogger(slog.Default()),
+    )
+}
+```
+
+A 404 still fails at once, and a 429 or 503 waits as SEC expects. Use
+`client.GetBytes(ctx, url)` for a filing, or `GetReader` to stream one.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
