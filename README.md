@@ -233,8 +233,8 @@ func (t secTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 }
 
 func NewSECClient() *retryrequest.Client {
-    return retryrequest.New(
-		// Respect SEC rate limits 
+    return retryrequest.New( 
+        // Respect SEC rate limits 
         retryrequest.WithHTTPClient(&http.Client{
             Transport: secTransport{
 				next: http.DefaultTransport, 
