@@ -58,6 +58,7 @@ type Client struct {
 	maxWaitSet         bool
 	minWaitOn429       time.Duration
 	waitOn503          time.Duration
+	retryAfterAll      bool
 	retryIf            func(*http.Response, error) bool
 	headers            http.Header
 	maxBodyBytes       int64

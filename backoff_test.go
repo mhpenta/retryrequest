@@ -95,6 +95,9 @@ func TestStatusWaitOptions(t *testing.T) {
 		{"503 explicit zero", 503, "0", WithWaitOn503(2 * time.Second), 0},
 		{"503 option disabled", 503, "0", WithWaitOn503(0), base},
 		{"other status", 502, "7", WithWaitOn503(2 * time.Second), base},
+		{"502 server minimum", 502, "7", WithRetryAfterOnAllStatuses(), 7 * time.Second},
+		{"502 longer backoff", 502, "1", WithRetryAfterOnAllStatuses(), base},
+		{"502 invalid header", 502, "later", WithRetryAfterOnAllStatuses(), base},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
@@ -121,5 +124,38 @@ func TestConfiguredStatusWaitExceedsCap(t *testing.T) {
 	var exhausted *RetryError
 	if !errors.As(err, &exhausted) || calls != 1 || !strings.Contains(exhausted.Reason, "configured 503 wait") {
 		t.Fatalf("error = %v, calls = %d", err, calls)
+	}
+}
+
+func TestRetryAfterOnAllStatusesExceedsCap(t *testing.T) {
+	retryConflict := func(resp *http.Response, err error) bool {
+		return err == nil && resp.StatusCode == http.StatusConflict
+	}
+	for _, tt := range []struct {
+		name      string
+		code      int
+		predicate func(*http.Response, error) bool
+		retryable bool
+	}{
+		{"502", 502, nil, true},
+		{"409", 409, nil, false},
+		{"409 with custom policy", 409, retryConflict, true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			calls := 0
+			client := New(WithHTTPClient(statusClient(&calls, tt.code, "60")), WithRetryAfterOnAllStatuses(), WithRetryIf(tt.predicate))
+			_, err := client.GetBytes(t.Context(), "https://example.test")
+			var status *StatusError
+			if calls != 1 || !errors.As(err, &status) || status.StatusCode != tt.code {
+				t.Fatalf("calls = %d, error = %v", calls, err)
+			}
+			var exhausted *RetryError
+			if errors.As(err, &exhausted) != tt.retryable {
+				t.Fatalf("retryable = %t, error = %v", tt.retryable, err)
+			}
+			if tt.retryable && !strings.Contains(exhausted.Reason, "Retry-After exceeds maximum wait") {
+				t.Fatalf("unexpected stop reason: %s", exhausted.Reason)
+			}
+		})
 	}
 }

@@ -162,7 +162,9 @@ func (c *Client) waitForStatus(status *StatusError) statusWait {
 			return statusWait{delay: c.waitOn503, source: "configured 503 wait", exact: true}
 		}
 	default:
-		return statusWait{}
+		if !c.retryAfterAll {
+			return statusWait{}
+		}
 	}
 	return statusWait{delay: status.RetryAfter, source: "Retry-After"}
 }

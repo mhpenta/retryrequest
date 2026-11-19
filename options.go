@@ -46,6 +46,14 @@ func WithBackOff(factory func() backoff.BackOff) Option {
 	return func(c *Client) { c.newBackOff = factory }
 }
 
+// WithRetryAfterOnAllStatuses extends Retry-After handling from 429 and 503
+// to every non-2xx status selected by the retry policy (see [WithRetryIf]).
+// The header sets a minimum wait, subject to the configured retry limits and
+// the status-specific rules of [WithLongBackOffOn429] and [WithWaitOn503].
+func WithRetryAfterOnAllStatuses() Option {
+	return func(c *Client) { c.retryAfterAll = true }
+}
+
 // WithLongBackOffOn429 sets a minimum wait after a 429. A longer backoff or
 // Retry-After takes precedence. A nonpositive duration disables this minimum.
 func WithLongBackOffOn429(wait time.Duration) Option {

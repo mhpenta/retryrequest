@@ -15,7 +15,8 @@ body, err := client.GetBytes(ctx, "https://example.com/data")
 
 ## Retry policy
 
-- **Failures.** The default policy retries transient transport errors, HTTP 408, 425, 429, and 5xx except 501, 505, and 511. On 429 and 503, `Retry-After` sets the minimum wait.
+- **Failures.** The default policy retries transient transport errors, HTTP 408, 425, 429, and 5xx except 501, 505, and 511.
+- **Retry-After.** By default, 429 and 503 honor the header. Pass `WithRetryAfterOnAllStatuses()` to use it as a minimum wait for every HTTP status your policy retries. For example, a 502 with `Retry-After: 60` ends retries immediately under the default 10-second wait cap.
 - **Configurable defaults.** Up to four attempts including the first, up to 10 seconds between attempts, and a 30-second budget for scheduling retries. Set a context deadline to bound the entire request.
 - **Writes.** POST and PATCH are sent once by default. To enable retries, supply an idempotency key the server honors or use `WithRetryNonIdempotent()` when repeats are harmless. Retrying a request with a body requires `req.GetBody`.
 
