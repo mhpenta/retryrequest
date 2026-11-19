@@ -170,12 +170,14 @@ func WithBeforeAttempt(hook func(req *http.Request, attempt int) error) Option {
 }
 
 // WithUTF8Conversion makes the body helpers convert text and XML responses to
-// UTF-8 from the charset the response declares or its content suggests. JSON
-// and ZIP media types are left as they are. Conversion rewrites the bytes, so
-// leave it off for byte-exact downloads, checksums, or XML whose declaration
-// names its own encoding: a decoder would convert that text a second time.
-// The output limit applies after conversion. Gzip is decompressed whether or
-// not this is set.
+// UTF-8. A UTF-8 or UTF-16 BOM takes precedence over the HTTP charset.
+// Without either, HTML uses HTML charset sniffing and XML uses its encoding
+// declaration, defaulting to UTF-8. Other text uses a 1 KiB sample starting at
+// its first non-ASCII byte, falling back to Windows-1252 if it finds invalid UTF-8.
+// Leave conversion off for byte-exact downloads and checksums.
+// JSON and ZIP bypass conversion. XML declarations retain their original text,
+// so leave conversion off when passing XML to a charset-aware parser.
+// The output limit applies after conversion. Gzip is decompressed independently.
 func WithUTF8Conversion() Option {
 	return func(c *Client) { c.utf8Conversion = true }
 }

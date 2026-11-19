@@ -7,26 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"mime"
 	"net/http"
 	"strings"
-
-	"golang.org/x/net/html/charset"
 )
-
-// ErrBodyTooLarge identifies a response that exceeds the helper output limit.
-var ErrBodyTooLarge = errors.New("HTTP response body too large")
-
-// BodyTooLargeError describes the limit that was exceeded.
-type BodyTooLargeError struct {
-	Limit int64
-}
-
-func (e *BodyTooLargeError) Error() string {
-	return fmt.Sprintf("%s: limit is %d bytes", ErrBodyTooLarge, e.Limit)
-}
-
-func (e *BodyTooLargeError) Unwrap() error { return ErrBodyTooLarge }
 
 // GetBytes fetches and reads the response body. Reading happens inside each
 // attempt, so a body cut off mid-transfer is fetched again under the same
@@ -96,7 +79,7 @@ func (c *Client) prepareRequest(req *http.Request) {
 // applies the output limit to a 2xx response. It closes the response body if
 // it fails.
 func (c *Client) openBody(resp *http.Response) (io.ReadCloser, error) {
-	body, err := decodeBody(resp, c.utf8Conversion)
+	body, err := c.decodeBody(resp)
 	if err != nil {
 		return nil, err
 	}
@@ -107,7 +90,7 @@ func (c *Client) openBody(resp *http.Response) (io.ReadCloser, error) {
 	return &responseReader{Reader: reader, close: body.Close}, nil
 }
 
-func decodeBody(resp *http.Response, convertCharset bool) (io.ReadCloser, error) {
+func (c *Client) decodeBody(resp *http.Response) (io.ReadCloser, error) {
 	var reader io.Reader = resp.Body
 	closeBody := resp.Body.Close
 	if strings.EqualFold(strings.TrimSpace(resp.Header.Get("Content-Encoding")), "gzip") {
@@ -125,42 +108,15 @@ func decodeBody(resp *http.Response, convertCharset bool) (io.ReadCloser, error)
 		}
 	}
 
-	contentType := resp.Header.Get("Content-Type")
-	mediaType, _, _ := mime.ParseMediaType(contentType)
-	_, subtype, _ := strings.Cut(mediaType, "/")
-	isJSON := subtype == "json" || strings.HasSuffix(subtype, "+json")
-	isZIP := subtype == "zip" || strings.HasSuffix(subtype, "+zip")
-	isXML := subtype == "xml" || strings.HasPrefix(subtype, "xml-") || strings.HasSuffix(subtype, "+xml")
-	if convertCharset && !isJSON && !isZIP && (strings.HasPrefix(mediaType, "text/") || isXML) {
-		decoded, err := charset.NewReader(truncationGuard{reader}, contentType)
-		switch {
-		case errors.Is(err, io.EOF):
-			reader = http.NoBody
-		case err == nil:
-			reader = decoded
-		default:
+	if c.utf8Conversion {
+		decoded, err := newCharsetReader(reader, resp.Header.Get("Content-Type"), c.maxBodyBytes)
+		if err != nil {
 			_ = closeBody()
 			return nil, fmt.Errorf("decode response charset: %w", err)
 		}
+		reader = decoded
 	}
 	return &responseReader{Reader: reader, close: closeBody}, nil
-}
-
-// errTruncated is io.ErrUnexpectedEOF under another identity. charset.NewReader
-// reads ahead with io.ReadFull and treats io.ErrUnexpectedEOF as a short body,
-// which would silently return a truncated response as complete.
-var errTruncated = fmt.Errorf("response body truncated: %w", io.ErrUnexpectedEOF)
-
-type truncationGuard struct{ io.Reader }
-
-func (g truncationGuard) Read(p []byte) (int, error) {
-	n, err := g.Reader.Read(p)
-	// Exact comparison on purpose: charset.NewReader only swallows the bare
-	// sentinel, and replacing a wrapped one would discard its context.
-	if err == io.ErrUnexpectedEOF { //nolint:errorlint // see above
-		err = errTruncated
-	}
-	return n, err
 }
 
 type responseReader struct {

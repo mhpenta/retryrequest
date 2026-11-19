@@ -2,14 +2,11 @@ package retryrequest
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net/http"
 
 	"golang.org/x/time/rate"
 )
-
-var errRateLimitWait = errors.New("waiting for rate limit")
 
 type rateLimitedTransport struct {
 	next    http.RoundTripper
