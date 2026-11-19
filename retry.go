@@ -181,22 +181,45 @@ func (c *Client) defaultBackOff() backoff.BackOff {
 	}
 }
 
-// retrySchedule wraps the configured backoff. When capped, maxWait limits
-// each wait and a longer Retry-After stops retrying. Uncapped (a custom
-// backoff without WithMaxRetryWait), waits and Retry-After are used as given,
-// still bounded by the elapsed-time budget and the context deadline.
+// A status wait is a minimum unless the caller selects a fixed wait for 503.
+type statusWait struct {
+	delay  time.Duration
+	source string
+	exact  bool
+}
+
+func (c *Client) waitForStatus(status *StatusError) statusWait {
+	switch status.StatusCode {
+	case http.StatusTooManyRequests:
+		if c.minWaitOn429 > status.RetryAfter {
+			return statusWait{delay: c.minWaitOn429, source: "configured 429 minimum"}
+		}
+	case http.StatusServiceUnavailable:
+		if c.waitOn503 > 0 {
+			if status.RetryAfter >= 0 {
+				return statusWait{delay: status.RetryAfter, source: "Retry-After", exact: true}
+			}
+			return statusWait{delay: c.waitOn503, source: "configured 503 wait", exact: true}
+		}
+	default:
+		return statusWait{}
+	}
+	return statusWait{delay: status.RetryAfter, source: "Retry-After"}
+}
+
+// retrySchedule applies the status policy and request limits to each backoff.
 type retrySchedule struct {
 	backoff.BackOff
 	ctx        context.Context
 	maxWait    time.Duration
 	capped     bool
-	retryAfter time.Duration
+	statusWait statusWait
 	stopReason string
 }
 
 func (s *retrySchedule) NextBackOff() time.Duration {
-	if s.capped && s.retryAfter > s.maxWait {
-		s.stopReason = fmt.Sprintf("Retry-After exceeds maximum wait of %s", s.maxWait)
+	if s.capped && s.statusWait.delay > s.maxWait {
+		s.stopReason = fmt.Sprintf("%s exceeds maximum wait of %s", s.statusWait.source, s.maxWait)
 		return backoff.Stop
 	}
 	next := s.BackOff.NextBackOff()
@@ -206,7 +229,10 @@ func (s *retrySchedule) NextBackOff() time.Duration {
 	if s.capped {
 		next = min(next, s.maxWait)
 	}
-	wait := max(0, next, s.retryAfter)
+	wait := max(0, next, s.statusWait.delay)
+	if s.statusWait.exact {
+		wait = s.statusWait.delay
+	}
 	if deadline, ok := s.ctx.Deadline(); ok && time.Until(deadline) <= wait {
 		s.stopReason = fmt.Sprintf("retry wait of %s would reach the context deadline", wait)
 		return backoff.Stop

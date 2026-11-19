@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/cenkalti/backoff/v7"
+	"golang.org/x/time/rate"
 )
 
 const maxDrainBytes = 64 << 10
@@ -49,11 +50,14 @@ var defaultHTTPClient = &http.Client{
 // be shared by concurrent callers.
 type Client struct {
 	httpClient         *http.Client
+	limiter            *rate.Limiter
 	newBackOff         func() backoff.BackOff
 	maxAttempts        uint
 	maxElapsed         time.Duration
 	maxWait            time.Duration
 	maxWaitSet         bool
+	minWaitOn429       time.Duration
+	waitOn503          time.Duration
 	retryIf            func(*http.Response, error) bool
 	headers            http.Header
 	maxBodyBytes       int64
@@ -81,6 +85,9 @@ func New(opts ...Option) *Client {
 	}
 	for _, opt := range opts {
 		opt(c)
+	}
+	if c.limiter != nil {
+		c.httpClient = withRateLimitedTransport(c.httpClient, c.limiter)
 	}
 	if c.newBackOff == nil {
 		c.newBackOff = c.defaultBackOff
@@ -167,7 +174,7 @@ func (c *Client) do(ctx context.Context, req *http.Request, read readFunc) (*htt
 			attempt.Body = body
 		}
 		attempts++
-		schedule.retryAfter = -1
+		schedule.statusWait = statusWait{}
 		if c.beforeAttempt != nil {
 			if err := c.beforeAttempt(attempt, attempts); err != nil {
 				if attempt.Body != nil {
@@ -178,6 +185,11 @@ func (c *Client) do(ctx context.Context, req *http.Request, read readFunc) (*htt
 		}
 
 		resp, err := c.send(attempt)
+		if errors.Is(err, errRateLimitWait) {
+			// This round trip never started. Keep the failure that led to it.
+			lastErr = errors.Join(lastErr, err)
+			return finish(false)
+		}
 		if err == nil && resp.StatusCode >= 200 && resp.StatusCode < 300 {
 			if read == nil {
 				return attemptResult{resp: resp}, nil
@@ -199,9 +211,7 @@ func (c *Client) do(ctx context.Context, req *http.Request, read readFunc) (*htt
 			resp.Body = io.NopCloser(bytes.NewReader(raw))
 			status := responseError(resp, host, raw)
 			lastErr = status
-			if status.StatusCode == http.StatusTooManyRequests || status.StatusCode == http.StatusServiceUnavailable {
-				schedule.retryAfter = status.RetryAfter
-			}
+			schedule.statusWait = c.waitForStatus(status)
 		}
 		// On a redirect error net/http has already closed any response body.
 		retry := ctx.Err() == nil && !terminalError(err) && replayable && c.retryIf(resp, err)

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/cenkalti/backoff/v7"
+	"golang.org/x/time/rate"
 )
 
 // Option configures a Client at construction time.
@@ -22,6 +23,20 @@ func WithHTTPClient(client *http.Client) Option {
 	}
 }
 
+// WithRateLimiting sets the client's sustained rate in round trips per second
+// and its maximum burst. All callers, retries, and redirects through this
+// client share one token bucket. Waiting counts toward the request deadline.
+// A nonpositive limit or rate.Inf disables limiting. Burst values below one
+// use one, which spaces round trips evenly.
+func WithRateLimiting(limit rate.Limit, burst int) Option {
+	return func(c *Client) {
+		c.limiter = nil
+		if limit > 0 && limit < rate.Inf {
+			c.limiter = rate.NewLimiter(limit, max(1, burst))
+		}
+	}
+}
+
 // WithBackOff sets a factory that must return a fresh, non-nil backoff for
 // each request. Its waits are used as given, and a Retry-After is honored as
 // a minimum wait, both bounded by the elapsed-time budget and the context
@@ -29,6 +44,20 @@ func WithHTTPClient(client *http.Client) Option {
 // default jittered policy.
 func WithBackOff(factory func() backoff.BackOff) Option {
 	return func(c *Client) { c.newBackOff = factory }
+}
+
+// WithLongBackOffOn429 sets a minimum wait after a 429. A longer backoff or
+// Retry-After takes precedence. A nonpositive duration disables this minimum.
+func WithLongBackOffOn429(wait time.Duration) Option {
+	return func(c *Client) { c.minWaitOn429 = max(0, wait) }
+}
+
+// WithWaitOn503 uses the server's Retry-After as the wait after a 503,
+// including an explicit zero. If the header is missing or invalid, the
+// client waits for the configured duration. A nonpositive duration restores
+// the usual backoff. The wait cap, elapsed-time budget, and deadline apply.
+func WithWaitOn503(wait time.Duration) Option {
+	return func(c *Client) { c.waitOn503 = max(0, wait) }
 }
 
 // WithMaxAttempts sets the total number of attempts, including the first.
@@ -50,9 +79,10 @@ func WithMaxElapsedTime(d time.Duration) Option {
 	return func(c *Client) { c.maxElapsed = d }
 }
 
-// WithMaxRetryWait caps each wait between attempts, 10 seconds by default. A
-// longer Retry-After ends retries. A nonpositive cap allows only immediate
-// retries. A custom WithBackOff is capped only when this is set.
+// WithMaxRetryWait caps each wait between attempts, 10 seconds by default.
+// Retries stop if Retry-After or a configured status delay exceeds the cap.
+// A nonpositive cap allows only immediate retries. A custom WithBackOff is
+// capped only when this is set.
 func WithMaxRetryWait(d time.Duration) Option {
 	return func(c *Client) {
 		c.maxWait = max(0, d)

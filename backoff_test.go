@@ -75,3 +75,51 @@ func TestRetryAfterWithCustomBackOff(t *testing.T) {
 		}
 	})
 }
+
+func TestStatusWaitOptions(t *testing.T) {
+	const base = 4 * time.Second
+	for _, tt := range []struct {
+		name   string
+		code   int
+		header string
+		option Option
+		want   time.Duration
+	}{
+		{"429 minimum", 429, "", WithLongBackOffOn429(9 * time.Second), 9 * time.Second},
+		{"429 shorter header", 429, "2", WithLongBackOffOn429(9 * time.Second), 9 * time.Second},
+		{"429 longer header", 429, "12", WithLongBackOffOn429(9 * time.Second), 12 * time.Second},
+		{"429 longer backoff", 429, "", WithLongBackOffOn429(time.Second), base},
+		{"503 missing header", 503, "", WithWaitOn503(2 * time.Second), 2 * time.Second},
+		{"503 invalid header", 503, "later", WithWaitOn503(2 * time.Second), 2 * time.Second},
+		{"503 server delay", 503, "1", WithWaitOn503(2 * time.Second), time.Second},
+		{"503 explicit zero", 503, "0", WithWaitOn503(2 * time.Second), 0},
+		{"503 option disabled", 503, "0", WithWaitOn503(0), base},
+		{"other status", 502, "7", WithWaitOn503(2 * time.Second), base},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				calls := 0
+				client := New(WithHTTPClient(statusClient(&calls, tt.code, tt.header)), fixedBackOff(base), WithMaxAttempts(2), tt.option)
+				start := time.Now()
+				_, err := client.GetBytes(t.Context(), "https://example.test")
+				var status *StatusError
+				if calls != 2 || time.Since(start) != tt.want || !errors.As(err, &status) {
+					t.Fatalf("calls = %d, elapsed = %s, error = %v", calls, time.Since(start), err)
+				}
+				if status.Header.Get("Retry-After") != tt.header || status.RetryAfter != parseRetryAfter(tt.header, start) {
+					t.Fatalf("reported server Retry-After = %q (%s)", status.Header.Get("Retry-After"), status.RetryAfter)
+				}
+			})
+		})
+	}
+}
+
+func TestConfiguredStatusWaitExceedsCap(t *testing.T) {
+	calls := 0
+	client := New(WithHTTPClient(statusClient(&calls, 503, "")), WithWaitOn503(2*time.Minute))
+	_, err := client.GetBytes(t.Context(), "https://example.test")
+	var exhausted *RetryError
+	if !errors.As(err, &exhausted) || calls != 1 || !strings.Contains(exhausted.Reason, "configured 503 wait") {
+		t.Fatalf("error = %v, calls = %d", err, calls)
+	}
+}
